@@ -13,9 +13,9 @@
 ---
 
 ## Compile
-bash
-cd ~/nlocking-queue/blocking-queue/sequential
-make clean && make
+- bash
+- cd ~/nlocking-queue/blocking-queue/sequential
+- make clean && make
 
 ## Run 
 sbatch run_bfs.sbatch
