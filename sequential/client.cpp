@@ -1,5 +1,3 @@
-// client.cpp  (updated)
-// original code kept intact, minimal additions for parallel BFS (blocking queue + worker pool)
 #include <iostream>
 #include <string>
 #include <queue>
@@ -23,7 +21,7 @@ struct ParseException : std::runtime_error, rapidjson::ParseResult {
 #include <rapidjson/document.h>
 #include <chrono>
 
-// --- new includes for threading/locking ---
+// added these for threading and locking
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -114,8 +112,7 @@ vector<string> get_neighbors(const string& json_str) {
     return neighbors;
 }
 
-// -------------------- ORIGINAL SEQUENTIAL BFS (unchanged, renamed wrapper kept) --------------------
-// BFS Traversal Function (original sequential implementation)
+// BFS Traversal Function
 vector<string> bfs(CURL* curl, const string& start, int depth) {
     queue<pair<string, int>> q;
     unordered_set<string> visited;
@@ -149,9 +146,8 @@ vector<string> bfs(CURL* curl, const string& start, int depth) {
     return result;
 }
 
-// -------------------- ADDITIONS: BlockingQueue + Parallel BFS --------------------
 
-// BlockingQueue (thread-safe)
+// BlockingQueue code
 template<typename T>
 class BlockingQueue {
 public:
@@ -162,18 +158,22 @@ public:
             std::lock_guard<std::mutex> lk(mtx);
             q.push(std::move(item));
         }
-        cv.notify_one();
+        cv.notify_one(); // used to wake up any waiting/sleeping threads
     }
 
-    // pop: blocks until item available or done set. returns true if an item was popped.
+    // Pop blocks until item available or done flag
     bool pop(T &out) {
+        
         std::unique_lock<std::mutex> lk(mtx);
         cv.wait(lk, [&]{ return !q.empty() || done; });
         if (q.empty()) return false;
+        
         out = std::move(q.front());
         q.pop();
         return true;
     }
+
+
 
     void set_done() {
         {
@@ -183,41 +183,52 @@ public:
         cv.notify_all();
     }
 
+
+
     bool empty() {
         std::lock_guard<std::mutex> lk(mtx);
         return q.empty();
+        
     }
-
     void notify_all() { cv.notify_all(); }
+
+
 
 private:
     std::queue<T> q;
     std::mutex mtx;
+
     std::condition_variable cv;
+
     bool done;
 };
 
-// Work item for BFS
+// work item for BFS
 struct WorkItem {
+
     std::string node;
     int depth;
 };
 
 // Parallel BFS using blocking queue
 vector<string> bfs_parallel(const string& start_node, int max_depth, int num_threads) {
+    
     BlockingQueue<WorkItem> queue;
     unordered_set<string> visited;
+    
     std::mutex visited_mtx;
     std::atomic<int> active_workers{0};
 
-    // initialize
+
     visited.insert(start_node);
+    
     queue.push(WorkItem{start_node, 0});
 
-    // worker lambda
+    // lambda
     auto worker = [&](int tid) {
-        // create a per-thread CURL handle and reuse
+    
         CURL* thread_curl = curl_easy_init();
+        
         if (!thread_curl) {
             cerr << "[ERROR] thread " << tid << " failed to init curl\n";
             return;
@@ -225,29 +236,39 @@ vector<string> bfs_parallel(const string& start_node, int max_depth, int num_thr
 
         while (true) {
             WorkItem it;
+
+            
             bool ok = queue.pop(it);
-            if (!ok) break; // done and empty
+            if (!ok) break; // if done and empty
 
             active_workers.fetch_add(1, std::memory_order_relaxed);
 
+            
             if (it.depth < max_depth) {
                 string raw = fetch_neighbors(thread_curl, it.node);
                 vector<string> neighs;
                 try {
                     neighs = get_neighbors(raw);
+                    
                 } catch (const ParseException& e) {
+                    
                     cerr << "[WARN] parse error for node '" << it.node << "' on thread " << tid << "\n";
                     neighs.clear();
+                    
                 }
 
                 for (const auto &nb : neighs) {
                     bool push_this = false;
                     {
+                        
                         std::lock_guard<std::mutex> lk(visited_mtx);
                         if (visited.find(nb) == visited.end()) {
                             visited.insert(nb);
+
+                            
                             push_this = true;
                         }
+                        
                     }
                     if (push_this) {
                         queue.push(WorkItem{nb, it.depth + 1});
@@ -257,56 +278,51 @@ vector<string> bfs_parallel(const string& start_node, int max_depth, int num_thr
 
             int after = active_workers.fetch_sub(1, std::memory_order_relaxed) - 1;
 
-            // termination detection: if no active workers and queue empty -> set done
+            // set to done if therea re no active workers
             if (after == 0 && queue.empty()) {
                 queue.set_done();
             }
-        } // while
+        } 
 
         curl_easy_cleanup(thread_curl);
-    }; // worker
+    }; 
 
-    // spawn threads
+    
     vector<thread> threads;
+    
     threads.reserve(num_threads);
     for (int i = 0; i < num_threads; ++i) threads.emplace_back(worker, i);
-
-    // join
+    
     for (auto &t : threads) if (t.joinable()) t.join();
-
-    // gather visited nodes
     vector<string> results;
     {
         std::lock_guard<std::mutex> lk(visited_mtx);
         results.assign(visited.begin(), visited.end());
     }
-    sort(results.begin(), results.end()); // deterministic-ish order for output
-
+    sort(results.begin(), results.end()); 
     return results;
 }
 
 // -------------------- MAIN --------------------
 int main(int argc, char* argv[]) {
-    // backward-compatible usage:
-    // 1) old behavior: ./client <node_name> <depth>  (sequential, exactly as before)
-    // 2) extended:   ./client <node_name> <depth> seq  (explicit sequential)
-    //                ./client <node_name> <depth> par [num_threads]  (parallel)
     if (argc != 3 && argc < 4) {
         cerr << "Usage (backward-compatible): " << argv[0] << " <node_name> <depth>\n";
         cerr << "Extended Usage: " << argv[0] << " <node_name> <depth> <seq|par> [num_threads]\n";
         return 1;
     }
 
-    string start_node = argv[1];     // example "Tom Hanks" (will be curl-escaped internally)
+    
+    string start_node = argv[1];     // example "Tom Hanks" 
     int depth;
+    
     try {
         depth = stoi(argv[2]);
     } catch (const exception& e) {
         cerr << "Error: Depth must be an integer.\n";
         return 1;
     }
+    
 
-    // If only 2 args provided, preserve original sequential behavior exactly.
     if (argc == 3) {
         // original sequential flow
         CURL* curl = curl_easy_init();
@@ -328,14 +344,16 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // If we reach here, argc >= 4 and user wants an explicit mode
+    // argc >= 4 and user wants an explicit mode
     string mode = argv[3];
     if (mode != "seq" && mode != "par") {
+        
         cerr << "Mode must be 'seq' or 'par'\n";
         return 1;
     }
 
-    // initialize curl globally (recommended before using curl in multiple threads)
+    
+    // initialize curl globally 
     curl_global_init(CURL_GLOBAL_ALL);
 
     try {
@@ -344,7 +362,7 @@ int main(int argc, char* argv[]) {
         vector<string> visited_nodes;
 
         if (mode == "seq") {
-            // sequential (explicit)
+            // sequential 
             CURL* curl = curl_easy_init();
             if (!curl) {
                 cerr << "Failed to initialize CURL" << endl;
@@ -354,7 +372,7 @@ int main(int argc, char* argv[]) {
             visited_nodes = bfs(curl, start_node, depth);
             curl_easy_cleanup(curl);
         } else {
-            // parallel mode
+            // parallel
             int threads = 8;
             if (argc >= 5) {
                 try { threads = stoi(argv[4]); } catch (...) { threads = 8; }
@@ -372,18 +390,22 @@ int main(int argc, char* argv[]) {
         cout << "VISITED_COUNT: " << visited_nodes.size() << "\n";
         cout << "ELAPSED(s): " << elapsed_seconds.count() << "\n";
         cout << "VISITED_NODES:\n";
+        
+        
         for (const auto &n : visited_nodes) cout << n << "\n";
 
     } catch (const ParseException& e) {
         cerr << "JSON parse error: " << e.what() << "\n";
         curl_global_cleanup();
+        
         return 1;
     } catch (const exception& e) {
         cerr << "Exception: " << e.what() << "\n";
         curl_global_cleanup();
+        
         return 1;
     }
-
     curl_global_cleanup();
     return 0;
 }
+
